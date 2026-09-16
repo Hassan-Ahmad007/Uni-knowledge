@@ -2,4 +2,6 @@ streamlit
 groq
 faiss-cpu
 sentence-transformers
+langchain-core
+langchain-community
 numpy
