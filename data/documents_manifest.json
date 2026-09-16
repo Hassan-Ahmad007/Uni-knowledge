@@ -1,0 +1,38 @@
+[
+  {
+    "file_name": "academic_calendar-v5.pdf",
+    "pages": 5,
+    "file_size_bytes": 32991,
+    "document_type": "PDF"
+  },
+  {
+    "file_name": "admission_guidelines-v5.pdf",
+    "pages": 6,
+    "file_size_bytes": 40568,
+    "document_type": "PDF"
+  },
+  {
+    "file_name": "examination_rules-v5.pdf",
+    "pages": 5,
+    "file_size_bytes": 33272,
+    "document_type": "PDF"
+  },
+  {
+    "file_name": "fee_policy-v5.pdf",
+    "pages": 5,
+    "file_size_bytes": 33373,
+    "document_type": "PDF"
+  },
+  {
+    "file_name": "scholarship_policy-v5.pdf",
+    "pages": 5,
+    "file_size_bytes": 33501,
+    "document_type": "PDF"
+  },
+  {
+    "file_name": "student_handbook-v5.pdf",
+    "pages": 5,
+    "file_size_bytes": 32696,
+    "document_type": "PDF"
+  }
+]
