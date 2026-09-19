@@ -4,4 +4,4 @@ faiss-cpu
 sentence-transformers
 langchain-core
 langchain-community
-numpy
+langchain-huggingface[full]
