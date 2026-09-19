@@ -2,60 +2,53 @@ import json
 import os
 from pathlib import Path
 
-import faiss
-import numpy as np
 import streamlit as st
 from groq import Groq
-from sentence_transformers import SentenceTransformer
+
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 # ============================================================
-# CONFIGURATION
+# APPLICATION CONFIGURATION
 # ============================================================
 
-APP_TITLE = "University Academic Knowledge Assistant"
+APP_TITLE = "University Student & Academic Knowledge Assistant"
 
 BASE_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = BASE_DIR / "data"
 
-FAISS_INDEX_PATH = DATA_DIR / "faiss_index" / "index.faiss"
+FAISS_DIR = DATA_DIR / "faiss_index"
 
-CHUNKS_PATH = DATA_DIR / "chunks.json"
+METADATA_PATH = DATA_DIR / "metadata.json"
 
 CONFIG_PATH = DATA_DIR / "rag_config.json"
 
 MANIFEST_PATH = DATA_DIR / "documents_manifest.json"
 
-
-# Must be exactly the same embedding model used
-# when the FAISS index was created.
-
 DEFAULT_EMBEDDING_MODEL = (
     "sentence-transformers/all-MiniLM-L6-v2"
 )
 
-DEFAULT_LLM_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 TOP_K = 5
 
-MIN_SIMILARITY = 0.20
-
 
 # ============================================================
-# PAGE CONFIG
+# STREAMLIT PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 
 # ============================================================
-# CUSTOM CSS
+# PAGE STYLING
 # ============================================================
 
 st.markdown(
@@ -69,25 +62,16 @@ st.markdown(
     }
 
     .subtitle {
-        color: #666;
+        color: #666666;
         font-size: 1rem;
         margin-bottom: 1.5rem;
     }
 
     .source-box {
         padding: 0.8rem;
+        border: 1px solid #dddddd;
         border-radius: 8px;
-        border: 1px solid #ddd;
         margin-bottom: 0.6rem;
-    }
-
-    .source-title {
-        font-weight: 600;
-    }
-
-    .source-meta {
-        color: #666;
-        font-size: 0.85rem;
     }
 
     </style>
@@ -97,7 +81,7 @@ st.markdown(
 
 
 # ============================================================
-# LOAD CONFIGURATION
+# LOAD RAG CONFIGURATION
 # ============================================================
 
 @st.cache_data
@@ -116,59 +100,55 @@ def load_rag_config():
 
 rag_config = load_rag_config()
 
-
 EMBEDDING_MODEL_NAME = rag_config.get(
     "embedding_model",
     DEFAULT_EMBEDDING_MODEL,
 )
 
 
-LLM_MODEL = rag_config.get(
-    "llm_model",
-    DEFAULT_LLM_MODEL,
-)
-
-
 # ============================================================
-# LOAD FAISS INDEX
-# ============================================================
-
-@st.cache_resource
-def load_faiss_index():
-
-    if not FAISS_INDEX_PATH.exists():
-
-        raise FileNotFoundError(
-            f"FAISS index not found at: "
-            f"{FAISS_INDEX_PATH}"
-        )
-
-    return faiss.read_index(
-        str(FAISS_INDEX_PATH)
-    )
-
-
-# ============================================================
-# LOAD CHUNKS AND METADATA
+# LOAD SOURCE METADATA
 # ============================================================
 
 @st.cache_data
-def load_chunks():
+def load_metadata():
 
-    if not CHUNKS_PATH.exists():
-
-        raise FileNotFoundError(
-            f"chunks.json not found at: "
-            f"{CHUNKS_PATH}"
-        )
+    if not METADATA_PATH.exists():
+        return []
 
     with open(
-        CHUNKS_PATH,
+        METADATA_PATH,
         "r",
         encoding="utf-8",
     ) as file:
-
         return json.load(file)
+
+
+metadata_records = load_metadata()
+
+
+def build_metadata_lookup(records):
+
+    lookup = {}
+
+    if isinstance(records, list):
+
+        for record in records:
+
+            vector_index = record.get(
+                "vector_index"
+            )
+
+            if vector_index is not None:
+
+                lookup[int(vector_index)] = record
+
+    return lookup
+
+
+METADATA_LOOKUP = build_metadata_lookup(
+    metadata_records
+)
 
 
 # ============================================================
@@ -178,9 +158,77 @@ def load_chunks():
 @st.cache_resource
 def load_embedding_model():
 
-    return SentenceTransformer(
-        EMBEDDING_MODEL_NAME
+    return HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL_NAME,
+        model_kwargs={
+            "device": "cpu"
+        },
+        encode_kwargs={
+            "normalize_embeddings": True
+        },
     )
+
+
+# ============================================================
+# LOAD EXISTING FAISS DATABASE
+# ============================================================
+
+@st.cache_resource
+def load_vectorstore():
+
+    if not FAISS_DIR.exists():
+
+        raise FileNotFoundError(
+            f"FAISS directory not found: {FAISS_DIR}"
+        )
+
+    index_file = FAISS_DIR / "index.faiss"
+
+    pickle_file = FAISS_DIR / "index.pkl"
+
+    if not index_file.exists():
+
+        raise FileNotFoundError(
+            f"FAISS index file not found: {index_file}"
+        )
+
+    if not pickle_file.exists():
+
+        raise FileNotFoundError(
+            f"FAISS metadata file not found: {pickle_file}"
+        )
+
+    embeddings = load_embedding_model()
+
+    vectorstore = FAISS.load_local(
+        str(FAISS_DIR),
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    return vectorstore
+
+
+# ============================================================
+# LOAD DOCUMENT MANIFEST
+# ============================================================
+
+@st.cache_data
+def load_manifest():
+
+    if not MANIFEST_PATH.exists():
+        return []
+
+    with open(
+        MANIFEST_PATH,
+        "r",
+        encoding="utf-8",
+    ) as file:
+
+        return json.load(file)
+
+
+document_manifest = load_manifest()
 
 
 # ============================================================
@@ -205,7 +253,8 @@ def get_groq_client():
     if not api_key:
 
         raise RuntimeError(
-            "GROQ_API_KEY is not configured."
+            "GROQ_API_KEY is not configured. "
+            "Add it to Streamlit Secrets."
         )
 
     return Groq(
@@ -218,92 +267,99 @@ def get_groq_client():
 # ============================================================
 
 def retrieve_documents(
-    query,
-    index,
-    chunks,
-    embedding_model,
+    question,
+    vectorstore,
     top_k=TOP_K,
 ):
 
-    # Generate query embedding
-    query_embedding = embedding_model.encode(
-        [query],
-        convert_to_numpy=True,
-        normalize_embeddings=True,
+    results = (
+        vectorstore
+        .similarity_search_with_score(
+            question,
+            k=top_k,
+        )
     )
 
-    query_embedding = (
-        query_embedding
-        .astype("float32")
-    )
+    retrieved_documents = []
 
-    # Search FAISS
-    distances, indices = index.search(
-        query_embedding,
-        top_k,
-    )
+    for document, distance in results:
 
-    results = []
+        metadata = dict(
+            document.metadata
+        )
 
-    for distance, vector_index in zip(
-        distances[0],
-        indices[0],
-    ):
+        vector_index = metadata.get(
+            "vector_index"
+        )
 
-        if vector_index < 0:
-            continue
+        if vector_index is not None:
 
-        if vector_index >= len(chunks):
-            continue
+            external_metadata = (
+                METADATA_LOOKUP.get(
+                    int(vector_index),
+                    {}
+                )
+            )
 
-        chunk = chunks[vector_index]
+            merged_metadata = {
+                **external_metadata,
+                **metadata,
+            }
+
+        else:
+
+            merged_metadata = metadata
 
         result = {
-            "vector_index": int(
-                vector_index
+            "text": document.page_content,
+
+            "distance": float(distance),
+
+            "vector_index": vector_index,
+
+            "file_name": (
+                merged_metadata.get(
+                    "file_name"
+                )
+                or merged_metadata.get(
+                    "source"
+                )
+                or "Unknown document"
             ),
 
-            "score": float(
-                distance
-            ),
-
-            "text": chunk.get(
-                "text",
-                ""
-            ),
-
-            "file_name": chunk.get(
-                "file_name",
-                "Unknown document"
-            ),
-
-            "page": chunk.get(
+            "page": merged_metadata.get(
                 "page",
                 "Unknown"
             ),
 
-            "chunk_id": chunk.get(
+            "chunk_id": merged_metadata.get(
                 "chunk_id",
                 "Unknown"
             ),
 
-            "total_pages": chunk.get(
+            "total_pages": merged_metadata.get(
                 "total_pages"
             ),
 
-            "document_type": chunk.get(
+            "document_type": merged_metadata.get(
                 "document_type",
                 "PDF"
             ),
+
+            "file_path": merged_metadata.get(
+                "file_path"
+            ),
         }
 
-        results.append(result)
+        retrieved_documents.append(
+            result
+        )
 
-    return results
+    return retrieved_documents
 
 
 # ============================================================
-# BUILD CONTEXT
+# BUILD RAG CONTEXT
 # ============================================================
 
 def build_context(results):
@@ -319,14 +375,11 @@ def build_context(results):
             f"""
 SOURCE {number}
 
-Document:
-{result["file_name"]}
+Document: {result["file_name"]}
 
-Page:
-{result["page"]}
+Page: {result["page"]}
 
-Chunk:
-{result["chunk_id"]}
+Chunk: {result["chunk_id"]}
 
 Content:
 {result["text"]}
@@ -339,64 +392,76 @@ Content:
 
 
 # ============================================================
-# GENERATE ANSWER
+# GENERATE ANSWER WITH GROQ
 # ============================================================
 
 def generate_answer(
     question,
-    retrieved_results,
-    chat_history,
+    retrieved_documents,
+    conversation_history,
 ):
 
     client = get_groq_client()
 
     context = build_context(
-        retrieved_results
+        retrieved_documents
     )
 
     system_prompt = """
 You are a University Student and Academic
 Knowledge Assistant.
 
-Your job is to answer questions using the
-provided university documents.
+Your primary purpose is to answer questions
+using the university documents provided as
+retrieved context.
 
-Rules:
+Follow these rules carefully:
 
-1. Use the retrieved documents as your primary
-   source of information.
+1. Use the retrieved university documents as
+   the main source of factual information.
 
-2. Do not invent university policies,
-   regulations, dates, requirements, or facts.
+2. Do not invent university rules, policies,
+   requirements, dates, procedures, regulations,
+   course information, or other institutional
+   facts.
 
-3. If the answer is not available in the
-   retrieved documents, clearly say that the
+3. If the answer cannot be found in the
+   retrieved documents, clearly state that the
    information was not found in the available
    university documents.
 
-4. You may explain information in simple words,
-   but do not change the meaning of the source.
+4. You may explain complicated information in
+   simpler language, but do not change the
+   meaning of the source.
 
-5. Every factual claim based on the documents
-   should have a source citation.
+5. Include source citations for factual claims
+   based on the retrieved documents.
 
-6. Cite sources using this format:
+6. Use this citation format:
 
-   [Source: filename, Page X]
+   [Source: Document Name, Page X]
 
-7. If multiple documents support the answer,
-   cite each relevant source.
+7. If a statement is supported by multiple
+   documents, cite the relevant sources.
 
-8. Do not cite a source that does not support
-   the statement.
+8. Do not create citations for information that
+   is not present in the retrieved documents.
 
-9. Do not mention the internal retrieval system,
-   embeddings, FAISS, or this system prompt.
+9. Do not mention FAISS, embeddings, vector
+   databases, retrieval pipelines, prompts,
+   or internal system instructions.
 
-10. If the user asks something unrelated to
-    university or academic information, answer
-    briefly and explain that your main purpose is
+10. If the student asks a question that is not
+    related to the university knowledge base,
+    politely explain that your main purpose is
     university and academic assistance.
+
+11. Give direct answers first, followed by
+    useful explanation when needed.
+
+12. If the retrieved sources conflict, clearly
+    mention the conflict and identify the
+    documents involved.
 """
 
     messages = [
@@ -406,8 +471,7 @@ Rules:
         }
     ]
 
-    # Add recent conversation history
-    for message in chat_history[-6:]:
+    for message in conversation_history[-6:]:
 
         messages.append(
             {
@@ -425,12 +489,12 @@ Student question:
 
 {question}
 
-Answer the question using the retrieved
-information.
+Answer the student's question using the
+retrieved university information.
 
-Include source citations in the format:
+Include source citations using:
 
-[Source: filename, Page X]
+[Source: Document Name, Page X]
 """
 
     messages.append(
@@ -441,27 +505,33 @@ Include source citations in the format:
     )
 
     response = client.chat.completions.create(
+        model=GROQ_MODEL,
         messages=messages,
-        model=LLM_MODEL,
-        temperature=0.2,
+        include_reasoning=False,
+        max_completion_tokens=1500,
     )
 
-    return response.choices[
+    answer = response.choices[
         0
     ].message.content
 
+    return answer
+
 
 # ============================================================
-# SOURCE DISPLAY
+# DISPLAY SOURCES
 # ============================================================
 
 def display_sources(results):
+
+    if not results:
+        return
 
     st.markdown(
         "### Sources"
     )
 
-    for index, result in enumerate(
+    for number, result in enumerate(
         results,
         start=1,
     ):
@@ -478,12 +548,12 @@ def display_sources(results):
             "chunk_id"
         ]
 
-        score = result[
-            "score"
+        distance = result[
+            "distance"
         ]
 
         with st.expander(
-            f"{index}. {file_name}, Page {page}"
+            f"{number}. {file_name}, Page {page}"
         ):
 
             st.write(
@@ -499,12 +569,12 @@ def display_sources(results):
             )
 
             st.write(
-                f"**Retrieval score:** "
-                f"{score:.4f}"
+                f"**FAISS distance:** "
+                f"{distance:.4f}"
             )
 
             st.markdown(
-                "**Retrieved text:**"
+                "**Retrieved content:**"
             )
 
             st.write(
@@ -513,23 +583,17 @@ def display_sources(results):
 
 
 # ============================================================
-# LOAD APPLICATION DATA
+# INITIALIZE APPLICATION DATA
 # ============================================================
 
 try:
 
-    index = load_faiss_index()
-
-    chunks = load_chunks()
-
-    embedding_model = (
-        load_embedding_model()
-    )
+    vectorstore = load_vectorstore()
 
 except Exception as error:
 
     st.error(
-        "The RAG database could not be loaded."
+        "The FAISS knowledge base could not be loaded."
     )
 
     st.exception(error)
@@ -538,12 +602,21 @@ except Exception as error:
 
 
 # ============================================================
+# SESSION STATE
+# ============================================================
+
+if "messages" not in st.session_state:
+
+    st.session_state.messages = []
+
+
+# ============================================================
 # HEADER
 # ============================================================
 
 st.markdown(
     '<div class="main-title">'
-    '🎓 University Academic Knowledge Assistant'
+    '🎓 University Student & Academic Knowledge Assistant'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -551,8 +624,9 @@ st.markdown(
 st.markdown(
     '<div class="subtitle">'
     'Ask questions about university policies, '
-    'academic regulations, courses, procedures, '
-    'and other available documents.'
+    'academic regulations, procedures, courses, '
+    'and other information available in the '
+    'knowledge base.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -568,23 +642,44 @@ with st.sidebar:
         "Knowledge Base"
     )
 
-    st.write(
-        f"Documents: "
-        f"{rag_config.get('documents', 'N/A')}"
+    document_count = rag_config.get(
+        "documents"
     )
 
-    st.write(
-        f"Pages: "
-        f"{rag_config.get('pages', 'N/A')}"
+    page_count = rag_config.get(
+        "pages"
     )
 
-    st.write(
-        f"Chunks: "
-        f"{rag_config.get('chunks', 'N/A')}"
+    chunk_count = rag_config.get(
+        "chunks"
     )
 
+    if document_count is not None:
+
+        st.write(
+            f"Documents: {document_count}"
+        )
+
+    else:
+
+        st.write(
+            f"Documents: {len(document_manifest)}"
+        )
+
+    if page_count is not None:
+
+        st.write(
+            f"Pages: {page_count}"
+        )
+
+    if chunk_count is not None:
+
+        st.write(
+            f"Chunks: {chunk_count}"
+        )
+
     st.write(
-        f"Embedding model:"
+        "Embedding model:"
     )
 
     st.caption(
@@ -592,11 +687,23 @@ with st.sidebar:
     )
 
     st.write(
-        f"LLM:"
+        "LLM:"
     )
 
     st.caption(
-        LLM_MODEL
+        GROQ_MODEL
+    )
+
+    st.divider()
+
+    st.write(
+        "Source tracing is enabled."
+    )
+
+    st.caption(
+        "Retrieved document name, page number, "
+        "chunk information, and source content "
+        "are displayed with each answer."
     )
 
     st.divider()
@@ -612,16 +719,7 @@ with st.sidebar:
 
 
 # ============================================================
-# SESSION STATE
-# ============================================================
-
-if "messages" not in st.session_state:
-
-    st.session_state.messages = []
-
-
-# ============================================================
-# DISPLAY PREVIOUS MESSAGES
+# DISPLAY CONVERSATION HISTORY
 # ============================================================
 
 for message in st.session_state.messages:
@@ -645,7 +743,7 @@ for message in st.session_state.messages:
 
 
 # ============================================================
-# CHAT INPUT
+# USER INPUT
 # ============================================================
 
 question = st.chat_input(
@@ -656,7 +754,7 @@ question = st.chat_input(
 if question:
 
     # --------------------------------------------------------
-    # Display user question
+    # Save and display user message
     # --------------------------------------------------------
 
     st.session_state.messages.append(
@@ -671,28 +769,41 @@ if question:
         st.markdown(question)
 
     # --------------------------------------------------------
-    # Retrieve documents
-    # --------------------------------------------------------
-
-    with st.spinner(
-        "Searching university documents..."
-    ):
-
-        retrieved_results = retrieve_documents(
-            query=question,
-            index=index,
-            chunks=chunks,
-            embedding_model=embedding_model,
-            top_k=TOP_K,
-        )
-
-    # --------------------------------------------------------
-    # Generate response
+    # Retrieve relevant documents
     # --------------------------------------------------------
 
     with st.chat_message(
         "assistant"
     ):
+
+        with st.spinner(
+            "Searching university documents..."
+        ):
+
+            try:
+
+                retrieved_documents = (
+                    retrieve_documents(
+                        question=question,
+                        vectorstore=vectorstore,
+                        top_k=TOP_K,
+                    )
+                )
+
+            except Exception as error:
+
+                st.error(
+                    "An error occurred while "
+                    "searching the knowledge base."
+                )
+
+                st.exception(error)
+
+                st.stop()
+
+        # ----------------------------------------------------
+        # Generate answer
+        # ----------------------------------------------------
 
         with st.spinner(
             "Generating answer..."
@@ -702,27 +813,40 @@ if question:
 
                 answer = generate_answer(
                     question=question,
-                    retrieved_results=retrieved_results,
-                    chat_history=st.session_state.messages,
-                )
-
-                st.markdown(answer)
-
-                display_sources(
-                    retrieved_results
+                    retrieved_documents=(
+                        retrieved_documents
+                    ),
+                    conversation_history=(
+                        st.session_state.messages
+                    ),
                 )
 
             except Exception as error:
 
-                answer = (
-                    "I couldn't generate an answer "
-                    "because the language model service "
-                    "returned an error."
+                st.error(
+                    "The Groq language model could "
+                    "not generate a response."
                 )
 
-                st.error(answer)
-
                 st.exception(error)
+
+                st.stop()
+
+        # ----------------------------------------------------
+        # Display answer
+        # ----------------------------------------------------
+
+        st.markdown(
+            answer
+        )
+
+        # ----------------------------------------------------
+        # Display sources
+        # ----------------------------------------------------
+
+        display_sources(
+            retrieved_documents
+        )
 
     # --------------------------------------------------------
     # Save assistant response
@@ -732,6 +856,6 @@ if question:
         {
             "role": "assistant",
             "content": answer,
-            "sources": retrieved_results,
+            "sources": retrieved_documents,
         }
     )
